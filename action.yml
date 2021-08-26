@@ -1,0 +1,83 @@
+# Prepares WordPress for use with the local Docker environment.
+#
+# This action assumes the following:
+# - The desired version of NPM has already been installed.author.
+# - All Docker environment related variables have been set to the desired values (LOCAL_PHP, LOCAL_PHP_MEMCACHED, etc.).
+# - The WordPress/wordpress-develop repository has been checked out.
+#
+# The following steps are performed:
+# - Set needed environment variables.
+# - Installs NPM dependencies
+# - Configures caching for Composer.
+# - Starts the WordPress Docker container.
+# - Starts the memcached server after the Docker network has been created (if desired).
+# - Logs the running Docker containers.
+# - Install WordPress within the Docker container.
+name: Set up WordPress
+description: Prepares WordPress for use with the local Docker environment
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure environment variables
+      shell: bash
+      run: |
+        echo "PHP_FPM_UID=$(id -u)" >> $GITHUB_ENV
+        echo "PHP_FPM_GID=$(id -g)" >> $GITHUB_ENV
+
+    - name: Install Dependencies
+      shell: bash
+      run: npm ci
+
+    # This date is used to ensure that the Composer cache is refreshed at least once every week.
+    # http://man7.org/linux/man-pages/man1/date.1.html
+    - name: "Get last Monday's date"
+      id: get-date
+      shell: bash
+      run: echo "::set-output name=date::$(/bin/date -u --date='last Mon' "+%F")"
+
+    - name: Get Composer cache directory
+      id: composer-cache
+      shell: bash
+      run: echo "::set-output name=dir::$(composer config cache-files-dir)"
+
+    - name: Cache Composer dependencies
+      uses: actions/cache@26968a09c0ea4f3e233fdddbafd1166051a095f6 # v2.1.4
+      env:
+        cache-name: cache-composer-dependencies
+      with:
+        path: ${{ steps.composer-cache.outputs.dir }}
+        key: ${{ runner.os }}-php-${{ matrix.php }}-date-${{ steps.get-date.outputs.date }}-composer-${{ hashFiles('**/composer.json') }}
+
+    - name: Install Composer dependencies
+      shell: bash
+      run: |
+        docker-compose run --rm php composer --version
+
+        # Install using `composer update` as there is no `composer.lock` file.
+        if [ ${{ env.LOCAL_PHP }} == '8.1-fpm' ]; then
+          docker-compose run --rm php composer update --ignore-platform-reqs
+        else
+          docker-compose run --rm php composer update
+        fi
+
+    - name: Start Docker environment
+      shell: bash
+      run: npm run env:start
+
+    # The memcached server needs to start after the Docker network has been set up with `npm run env:start`.
+    - name: Start the Memcached server.
+      shell: bash
+      run: |
+        if [ ${{ env.LOCAL_PHP_MEMCACHED }} == 'true' ]; then
+          cp tests/phpunit/includes/object-cache.php src/wp-content/object-cache.php
+          docker run --name memcached --net $(basename "$PWD")_wpdevnet -d memcached
+        fi
+
+    - name: Log running Docker containers
+      shell: bash
+      run: docker ps -a
+
+    - name: Install WordPress
+      shell: bash
+      run: npm run env:install
